@@ -1,0 +1,842 @@
+Option Explicit
+
+'==============================================================================
+' FILE GENERATOR - Main Entry Point
+'==============================================================================
+' Purpose: Generate individual Excel files from templates for each query item
+' Author: Farhan MUNIM
+' Last Modified: 2025-12-30
+' Updated: Fixed internal formula handling to preserve formulas instead of breaking them
+'==============================================================================
+
+Sub GenerateFiles()
+    
+    On Error GoTo ErrorHandler
+    
+    '--- Disable screen updates for performance ---
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Starting file generation process..."
+    
+    '--- STEP 1: Pre-flight checks ---
+    Application.StatusBar = "Running pre-flight checks..."
+    
+    If Not CheckInternetConnection() Then
+        MsgBox "You are not connected to the internet." & vbCrLf & vbCrLf & _
+               "Please connect to the internet and try again.", _
+               vbExclamation, "Internet Connection Required"
+        GoTo CleanExit
+    End If
+    
+    If Not CheckVPNConnection() Then
+        MsgBox "You are not connected to the VPN." & vbCrLf & vbCrLf & _
+               "Please connect to FortiClient VPN and try again.", _
+               vbExclamation, "VPN Connection Required"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 2: Validate configuration ---
+    Application.StatusBar = "Validating configuration..."
+    
+    Dim validationResult As String
+    validationResult = ValidateConfiguration()
+    
+    If validationResult <> "" Then
+        MsgBox validationResult, vbExclamation, "Configuration Error"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 3: Refresh Power Query connections (once) ---
+    Application.StatusBar = "Refreshing Power Query connections..."
+    
+    Dim refreshResult As String
+    refreshResult = RefreshPowerQueries()
+    
+    If refreshResult <> "" Then
+        MsgBox refreshResult, vbExclamation, "Power Query Refresh Error"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 4: Determine output path ---
+    Application.StatusBar = "Determining output file path..."
+    
+    Dim outputPath As String
+    Dim pathUsed As String
+    outputPath = DetermineOutputPath(pathUsed)
+    
+    '--- STEP 5: Generate files ---
+    Application.StatusBar = "Generating files..."
+    
+    Dim filesGenerated As Long
+    filesGenerated = GenerateAllFiles(outputPath)
+    
+    '--- STEP 6: Success message ---
+    Application.StatusBar = "File generation complete!"
+    
+    Dim successMsg As String
+    successMsg = "File generation completed successfully!" & vbCrLf & vbCrLf & _
+                 "Files generated: " & filesGenerated & vbCrLf & _
+                 "Saved to: " & outputPath & vbCrLf & vbCrLf
+    
+    If pathUsed = "desktop_fallback" Then
+        successMsg = successMsg & "Note: Your specified path was not found, so files were saved to the desktop instead."
+    ElseIf pathUsed = "desktop" Then
+        successMsg = successMsg & "Files saved to desktop as requested."
+    Else
+        successMsg = successMsg & "Files saved to your specified path."
+    End If
+    
+    MsgBox successMsg, vbInformation, "Success"
+    
+CleanExit:
+    '--- Clear template metadata ---
+    ClearTemplateMetadata
+    
+    '--- Restore Excel settings ---
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.StatusBar = False
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "An unexpected error occurred:" & vbCrLf & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Error"
+    GoTo CleanExit
+    
+End Sub
+
+'==============================================================================
+' CHECK INTERNET CONNECTION
+'==============================================================================
+' Returns: True if connected to internet, False otherwise
+'==============================================================================
+Private Function CheckInternetConnection() As Boolean
+    
+    On Error Resume Next
+    
+    Dim http As Object
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    
+    http.Open "GET", "https://www.microsoft.com", False
+    http.SetTimeouts 5000, 5000, 5000, 5000  'Set 5 second timeout
+    http.Send
+    
+    If Err.Number = 0 And http.status = 200 Then
+        CheckInternetConnection = True
+    Else
+        CheckInternetConnection = False
+    End If
+    
+    On Error GoTo 0
+    
+End Function
+
+'==============================================================================
+' CHECK VPN CONNECTION
+'==============================================================================
+' Returns: True if connected to VPN, False otherwise
+' Method: Checks if a known network file exists
+'==============================================================================
+Private Function CheckVPNConnection() As Boolean
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    '--- Check if network path is accessible ---
+    If fso.FileExists("I:\SYMPHONY\Farhan Munim\ping.xlsx") Then
+        CheckVPNConnection = True
+    Else
+        CheckVPNConnection = False
+    End If
+    
+End Function
+
+'==============================================================================
+' VALIDATE CONFIGURATION
+'==============================================================================
+' Returns: Empty string if valid, error message if invalid
+' Checks: Templates exist, query items exist, filenames exist, path config
+'==============================================================================
+Private Function ValidateConfiguration() As String
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    '--- Check 1: At least one template sheet exists ---
+    Dim ws As Worksheet
+    Dim hasTemplates As Boolean
+    hasTemplates = False
+    
+    For Each ws In ThisWorkbook.Worksheets
+        If Left(ws.Name, 6) = "tmplt_" Then
+            hasTemplates = True
+            Exit For
+        End If
+    Next ws
+    
+    If Not hasTemplates Then
+        ValidateConfiguration = "No template sheets found." & vbCrLf & vbCrLf & _
+                               "Template sheets must start with 'tmplt_' (e.g., tmplt_P&L)."
+        Exit Function
+    End If
+    
+    '--- Check 2: At least one query item exists (column C, row 25+) ---
+    Dim hasQueryItems As Boolean
+    hasQueryItems = False
+    
+    Dim i As Long
+    For i = 25 To appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+        If Trim(appSheet.Cells(i, "C").Value) <> "" Then
+            hasQueryItems = True
+            Exit For
+        End If
+    Next i
+    
+    If Not hasQueryItems Then
+        ValidateConfiguration = "No query items found." & vbCrLf & vbCrLf & _
+                               "Please enter at least one query item in column C starting at row 25."
+        Exit Function
+    End If
+    
+    '--- Check 3: Corresponding filenames exist (column D, row 25+) ---
+    For i = 25 To appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+        If Trim(appSheet.Cells(i, "C").Value) <> "" Then
+            If Trim(appSheet.Cells(i, "D").Value) = "" Then
+                ValidateConfiguration = "Missing filename in row " & i & "." & vbCrLf & vbCrLf & _
+                                       "Each query item must have a corresponding filename in column D."
+                Exit Function
+            End If
+        End If
+    Next i
+    
+    '--- Check 4: If save to desktop is "No", a specific path must be provided ---
+    Dim saveToDesktop As String
+    Dim specificPath As String
+    
+    saveToDesktop = LCase(Trim(appSheet.Range("D17").Value))
+    specificPath = Trim(appSheet.Range("D19").Value)
+    
+    If saveToDesktop = "no" And specificPath = "" Then
+        ValidateConfiguration = "Save to Desktop is set to 'No' but no specific path provided." & vbCrLf & vbCrLf & _
+                               "Please either:" & vbCrLf & _
+                               "- Set D17 to 'Yes' to save to desktop, OR" & vbCrLf & _
+                               "- Provide a specific path in D19"
+        Exit Function
+    End If
+    
+    '--- All checks passed ---
+    ValidateConfiguration = ""
+    
+End Function
+
+'==============================================================================
+' REFRESH POWER QUERIES
+'==============================================================================
+' Returns: Empty string if successful, error message if failed
+' Purpose: Refresh all Power Query connections listed in column H (row 6+)
+'==============================================================================
+Private Function RefreshPowerQueries() As String
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    '--- Find last row with table names in column H ---
+    Dim lastRow As Long
+    lastRow = appSheet.Cells(appSheet.Rows.count, "H").End(xlUp).Row
+    
+    '--- If no tables listed, skip this step ---
+    If lastRow < 6 Then
+        RefreshPowerQueries = ""
+        Exit Function
+    End If
+    
+    '--- Disable background refresh for synchronous operation ---
+    Dim cn As WorkbookConnection
+    For Each cn In ThisWorkbook.Connections
+        If cn.Type = xlConnectionTypeOLEDB Then
+            On Error Resume Next
+            cn.OLEDBConnection.BackgroundQuery = False
+            On Error GoTo 0
+        End If
+    Next cn
+    
+    '--- Loop through each table name and refresh ---
+    Dim i As Long
+    Dim tableName As String
+    Dim connectionFound As Boolean
+    Dim tableFound As Boolean
+    
+    For i = 6 To lastRow
+        
+        tableName = Trim(appSheet.Cells(i, "H").Value)
+        
+        '--- Skip empty rows ---
+        If tableName = "" Then GoTo NextTable
+        
+        '--- Step 1: Refresh the Power Query connection ---
+        connectionFound = False
+        
+        For Each cn In ThisWorkbook.Connections
+            '--- Connection name might be "Query - TableName" or just "TableName" ---
+            If cn.Name = "Query - " & tableName Or cn.Name = tableName Then
+                On Error Resume Next
+                cn.Refresh
+                Application.CalculateUntilAsyncQueriesDone
+                On Error GoTo 0
+                connectionFound = True
+                Exit For
+            End If
+        Next cn
+        
+        If Not connectionFound Then
+            RefreshPowerQueries = "Power Query connection not found: " & tableName & vbCrLf & vbCrLf & _
+                                 "Please check the table name in column H, row " & i & "."
+            Exit Function
+        End If
+        
+        '--- Step 2: Verify the table exists in the Data Model ---
+        tableFound = False
+        
+        On Error Resume Next
+        Dim lo As ListObject
+        For Each lo In appSheet.ListObjects
+            If lo.Name = tableName Then
+                tableFound = True
+                Exit For
+            End If
+        Next lo
+        On Error GoTo 0
+        
+        If Not tableFound Then
+            '--- Check other worksheets ---
+            Dim ws As Worksheet
+            For Each ws In ThisWorkbook.Worksheets
+                On Error Resume Next
+                For Each lo In ws.ListObjects
+                    If lo.Name = tableName Then
+                        tableFound = True
+                        Exit For
+                    End If
+                Next lo
+                On Error GoTo 0
+                If tableFound Then Exit For
+            Next ws
+        End If
+        
+        If Not tableFound Then
+            RefreshPowerQueries = "Table not found in workbook: " & tableName & vbCrLf & vbCrLf & _
+                                 "The connection refreshed, but the table does not appear in any worksheet." & vbCrLf & _
+                                 "Please verify the table name in column H, row " & i & "."
+            Exit Function
+        End If
+        
+NextTable:
+    Next i
+    
+    '--- All tables refreshed successfully ---
+    RefreshPowerQueries = ""
+    
+End Function
+
+'==============================================================================
+' DETERMINE OUTPUT PATH
+'==============================================================================
+' Returns: Output folder path with trailing backslash
+' Sets pathUsed to indicate which path logic was used
+'==============================================================================
+Private Function DetermineOutputPath(ByRef pathUsed As String) As String
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    Dim saveToDesktop As String
+    Dim specificPath As String
+    Dim desktopPath As String
+    
+    '--- Read configuration ---
+    saveToDesktop = LCase(Trim(appSheet.Range("D17").Value))
+    specificPath = Trim(appSheet.Range("D19").Value)
+    desktopPath = CreateObject("WScript.Shell").SpecialFolders("Desktop") & "\"
+    
+    '--- Determine path based on configuration ---
+    If saveToDesktop = "yes" Then
+        '--- User explicitly wants desktop ---
+        DetermineOutputPath = desktopPath
+        pathUsed = "desktop"
+        
+    ElseIf specificPath <> "" Then
+        '--- User provided a specific path ---
+        If fso.FolderExists(specificPath) Then
+            '--- Specific path exists, use it ---
+            If Right(specificPath, 1) <> "\" Then specificPath = specificPath & "\"
+            DetermineOutputPath = specificPath
+            pathUsed = "specific"
+        Else
+            '--- Specific path doesn't exist, fall back to desktop ---
+            DetermineOutputPath = desktopPath
+            pathUsed = "desktop_fallback"
+        End If
+        
+    Else
+        '--- No configuration provided, default to desktop ---
+        DetermineOutputPath = desktopPath
+        pathUsed = "desktop"
+        
+    End If
+    
+End Function
+
+'==============================================================================
+' GENERATE ALL FILES
+'==============================================================================
+' Returns: Number of files generated
+' Purpose: Main loop to generate one file per query item
+'==============================================================================
+Private Function GenerateAllFiles(outputPath As String) As Long
+    
+    On Error GoTo ErrorHandler
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    Dim lastRow As Long
+    Dim currentRow As Long
+    Dim queryItem As String
+    Dim fileName As String
+    Dim filesGenerated As Long
+    Dim stepDesc As String
+    
+    lastRow = appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+    filesGenerated = 0
+    
+    '--- Loop through each query item ---
+    For currentRow = 25 To lastRow
+        
+        queryItem = Trim(appSheet.Cells(currentRow, "C").Value)
+        fileName = Trim(appSheet.Cells(currentRow, "D").Value)
+        
+        '--- Skip empty rows ---
+        If queryItem = "" Then GoTo NextRow
+        
+        Application.StatusBar = "Generating file for: " & queryItem
+        
+        '--- Step 1: Generate sheets in THIS workbook (like generatesheets does) ---
+        stepDesc = "Step 1: Generating sheets in source workbook"
+        Dim sheetsGenerated As Long
+        sheetsGenerated = GenerateSheetsForFile(queryItem)
+        
+        '--- Step 2: Create new workbook ---
+        stepDesc = "Step 2: Creating new workbook"
+        Dim newWb As Workbook
+        Set newWb = Workbooks.Add(xlWBATWorksheet)
+        
+        '--- Step 3: Move generated sheets to new workbook ---
+        stepDesc = "Step 3: Moving sheets to new workbook"
+        MoveGeneratedSheetsToWorkbook newWb, queryItem
+        
+        '--- Step 4: Delete default blank sheets in new workbook ---
+        stepDesc = "Step 4: Cleaning up new workbook"
+        DeleteDefaultSheets newWb
+        
+        '--- Step 5: Delete generated sheets from source workbook ---
+        stepDesc = "Step 5: Cleaning up source workbook"
+        DeleteGeneratedSheets queryItem
+        
+        '--- Step 6: Final recalculation ---
+        stepDesc = "Step 6: Recalculating"
+        Application.Calculate
+        
+        '--- Force recalculation of all sheets in the new workbook ---
+        Dim wsCalc As Worksheet
+        For Each wsCalc In newWb.Worksheets
+            wsCalc.Calculate
+        Next wsCalc
+        
+        '--- Step 7: Break external links ---
+        stepDesc = "Step 7: Breaking external links"
+        BreakExternalLinks newWb
+        
+        '--- Step 8: Save the new workbook ---
+        stepDesc = "Step 8: Saving workbook"
+        Dim savedPath As String
+        savedPath = SaveWorkbook(newWb, outputPath, fileName, fso)
+        
+        '--- Step 9: Close the new workbook ---
+        stepDesc = "Step 9: Closing workbook"
+        newWb.Close SaveChanges:=False
+        Set newWb = Nothing
+        
+        filesGenerated = filesGenerated + 1
+        
+NextRow:
+    Next currentRow
+    
+    GenerateAllFiles = filesGenerated
+    Exit Function
+    
+ErrorHandler:
+    MsgBox "Error in GenerateAllFiles:" & vbCrLf & vbCrLf & _
+           "Step: " & stepDesc & vbCrLf & _
+           "Query Item: " & queryItem & vbCrLf & _
+           "Row: " & currentRow & vbCrLf & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Detailed Error Information"
+    
+    '--- Clean up if error occurred ---
+    On Error Resume Next
+    If Not newWb Is Nothing Then
+        newWb.Close SaveChanges:=False
+    End If
+    On Error GoTo 0
+    
+    Err.Raise Err.Number, , Err.Description
+    
+End Function
+
+'==============================================================================
+' GENERATE SHEETS FOR FILE
+'==============================================================================
+' Returns: Number of sheets generated
+' Purpose: Creates sheets in THIS workbook using the same logic as generatesheets
+'==============================================================================
+Private Function GenerateSheetsForFile(queryItem As String) As Long
+    
+    Dim wsTemplate As Worksheet
+    Dim wsNew As Worksheet
+    Dim baseTemplateName As String
+    Dim finalSheetName As String
+    Dim timestamp As String
+    Dim sheetsCreated As Long
+    
+    timestamp = "Generated: " & Format(Now, "yyyy-mm-dd hh:mm:ss")
+    sheetsCreated = 0
+    
+    '--- Loop through all template sheets ---
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            
+            '--- Extract base template name (remove "tmplt_" prefix) ---
+            baseTemplateName = Mid(wsTemplate.Name, 7)
+            
+            '--- Build final sheet name ---
+            '--- Use a temporary naming pattern to identify these sheets later ---
+            finalSheetName = "GEN_" & queryItem & "_" & baseTemplateName
+            
+            Application.StatusBar = "Creating sheet: " & finalSheetName
+            
+            '--- Step 1: Delete existing sheet if it exists ---
+            DeleteSheetIfExists finalSheetName
+            
+            '--- Step 2: Copy template sheet ---
+            wsTemplate.Copy After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count)
+            Set wsNew = ActiveSheet
+            
+            '--- Step 3: Update query item and timestamp ---
+            wsNew.Range("A2").Value = queryItem
+            wsNew.Range("A5").Value = timestamp
+            
+            '--- Step 4: Rename the sheet ---
+            wsNew.Name = finalSheetName
+            
+            '--- Step 5: Fix internal formulas (same as generatesheets) ---
+            FixInternalFormulasForSheet wsNew, queryItem
+            
+            '--- Step 6: Force recalculation ---
+            wsNew.Calculate
+            
+            sheetsCreated = sheetsCreated + 1
+            
+        End If
+        
+    Next wsTemplate
+    
+    GenerateSheetsForFile = sheetsCreated
+    
+End Function
+
+'==============================================================================
+' FIX INTERNAL FORMULAS FOR SHEET
+'==============================================================================
+' Purpose: Updates formulas in a newly created sheet to reference other
+'          generated sheets instead of templates (like generatesheets does)
+'==============================================================================
+Private Sub FixInternalFormulasForSheet(ws As Worksheet, queryItem As String)
+    
+    Dim wsTemplate As Worksheet
+    Dim baseTemplateName As String
+    Dim targetSheetName As String
+    Dim searchString As String
+    Dim replaceString As String
+    
+    '--- Loop through all template sheets ---
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            
+            '--- Extract base template name ---
+            baseTemplateName = Mid(wsTemplate.Name, 7)
+            
+            '--- Build the target sheet name (what the generated sheet is called) ---
+            targetSheetName = "GEN_" & queryItem & "_" & baseTemplateName
+            
+            '--- Handle QUOTED sheet names (with spaces/special chars) ---
+            searchString = "'" & wsTemplate.Name & "'!"
+            replaceString = "'" & targetSheetName & "'!"
+            
+            On Error Resume Next
+            ws.Cells.Replace _
+                What:=searchString, _
+                Replacement:=replaceString, _
+                LookAt:=xlPart, _
+                SearchOrder:=xlByRows, _
+                MatchCase:=False, _
+                SearchFormat:=False, _
+                ReplaceFormat:=False
+            On Error GoTo 0
+            
+            '--- Handle UNQUOTED sheet names (simple names) ---
+            searchString = wsTemplate.Name & "!"
+            replaceString = "'" & targetSheetName & "'!"
+            
+            On Error Resume Next
+            ws.Cells.Replace _
+                What:=searchString, _
+                Replacement:=replaceString, _
+                LookAt:=xlPart, _
+                SearchOrder:=xlByRows, _
+                MatchCase:=False, _
+                SearchFormat:=False, _
+                ReplaceFormat:=False
+            On Error GoTo 0
+            
+        End If
+        
+    Next wsTemplate
+    
+End Sub
+
+'==============================================================================
+' MOVE GENERATED SHEETS TO WORKBOOK
+'==============================================================================
+' Purpose: Moves all generated sheets for a query item to the new workbook
+'          and renames them (removes the GEN_ prefix)
+'==============================================================================
+Private Sub MoveGeneratedSheetsToWorkbook(newWb As Workbook, queryItem As String)
+    
+    Dim ws As Worksheet
+    Dim wsNext As Worksheet
+    Dim sheetPrefix As String
+    Dim baseSheetName As String
+    Dim newSheetName As String
+    
+    sheetPrefix = "GEN_" & queryItem & "_"
+    
+    '--- Loop through sheets in reverse (since we're moving them) ---
+    Dim i As Long
+    For i = ThisWorkbook.Worksheets.count To 1 Step -1
+        
+        Set ws = ThisWorkbook.Worksheets(i)
+        
+        If Left(ws.Name, Len(sheetPrefix)) = sheetPrefix Then
+            
+            '--- Extract the base name (remove GEN_QueryItem_ prefix) ---
+            baseSheetName = Mid(ws.Name, Len(sheetPrefix) + 1)
+            
+            '--- Move sheet to new workbook ---
+            ws.Move After:=newWb.Sheets(newWb.Sheets.count)
+            
+            '--- Rename it in the new workbook ---
+            newWb.Sheets(newWb.Sheets.count).Name = baseSheetName
+            
+        End If
+        
+    Next i
+    
+End Sub
+
+'==============================================================================
+' DELETE GENERATED SHEETS
+'==============================================================================
+' Purpose: Deletes any generated sheets that might still be in source workbook
+'          (cleanup in case of errors)
+'==============================================================================
+Private Sub DeleteGeneratedSheets(queryItem As String)
+    
+    Dim ws As Worksheet
+    Dim sheetPrefix As String
+    
+    sheetPrefix = "GEN_" & queryItem & "_"
+    
+    '--- Loop through sheets in reverse ---
+    Dim i As Long
+    For i = ThisWorkbook.Worksheets.count To 1 Step -1
+        
+        Set ws = ThisWorkbook.Worksheets(i)
+        
+        If Left(ws.Name, Len(sheetPrefix)) = sheetPrefix Then
+            Application.DisplayAlerts = False
+            ws.Delete
+            Application.DisplayAlerts = True
+        End If
+        
+    Next i
+    
+End Sub
+
+'==============================================================================
+' DELETE DEFAULT SHEETS
+'==============================================================================
+' Purpose: Removes the default blank sheets from a new workbook
+'==============================================================================
+Private Sub DeleteDefaultSheets(wb As Workbook)
+    
+    Dim ws As Worksheet
+    
+    '--- Delete Sheet1, Sheet2, Sheet3, etc. ---
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    
+    For Each ws In wb.Worksheets
+        If Left(ws.Name, 5) = "Sheet" Or ws.Name = "Sheet1" Then
+            ws.Delete
+        End If
+    Next ws
+    
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    
+End Sub
+
+'==============================================================================
+' DELETE SHEET IF EXISTS
+'==============================================================================
+' Purpose: Safely deletes a sheet if it exists (no error if not found)
+'==============================================================================
+Private Sub DeleteSheetIfExists(sheetName As String)
+    
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+    
+    If Not ws Is Nothing Then
+        Application.DisplayAlerts = False
+        ws.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+End Sub
+
+'==============================================================================
+' BREAK EXTERNAL LINKS
+'==============================================================================
+' Purpose: Removes any external workbook links from the new workbook
+'          This ensures the file is completely standalone
+'==============================================================================
+Private Sub BreakExternalLinks(wb As Workbook)
+
+    Dim links As Variant
+    Dim link As Variant
+
+    On Error Resume Next
+    links = wb.LinkSources(Type:=xlLinkTypeExcelLinks)
+    On Error GoTo 0
+
+    If IsEmpty(links) Then Exit Sub
+
+    For Each link In links
+        wb.BreakLink Name:=link, Type:=xlLinkTypeExcelLinks
+    Next link
+
+End Sub
+
+' Returns: Full path where file was saved
+' Purpose: Saves workbook, handles filename conflicts automatically
+'==============================================================================
+Private Function SaveWorkbook(wb As Workbook, outputPath As String, _
+                              fileName As String, fso As Object) As String
+    
+    On Error GoTo ErrorHandler
+    
+    Dim fullPath As String
+    Dim fileIndex As Long
+    Dim baseName As String
+    Dim extension As String
+    Dim dotPosition As Long
+    
+    '--- Ensure filename has .xlsx extension ---
+    dotPosition = InStrRev(fileName, ".")
+    
+    If dotPosition > 0 Then
+        baseName = Left(fileName, dotPosition - 1)
+        extension = Mid(fileName, dotPosition)
+    Else
+        baseName = fileName
+        extension = ".xlsx"
+    End If
+    
+    '--- Build initial full path ---
+    fullPath = outputPath & baseName & extension
+    fileIndex = 1
+    
+    '--- Handle filename conflicts by adding (1), (2), etc. ---
+    Do While fso.FileExists(fullPath)
+        fullPath = outputPath & baseName & " (" & fileIndex & ")" & extension
+        fileIndex = fileIndex + 1
+    Loop
+    
+    '--- Save the workbook ---
+    wb.SaveAs fileName:=fullPath, FileFormat:=xlOpenXMLWorkbook
+    
+    SaveWorkbook = fullPath
+    Exit Function
+    
+ErrorHandler:
+    MsgBox "Error in SaveWorkbook:" & vbCrLf & vbCrLf & _
+           "Attempting to save to: " & fullPath & vbCrLf & _
+           "Filename: " & fileName & vbCrLf & _
+           "Output Path: " & outputPath & vbCrLf & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Save Error"
+    Err.Raise Err.Number, , Err.Description
+    
+End Function
+
+
+
+'==============================================================================
+' CLEAR TEMPLATE METADATA
+'==============================================================================
+' Purpose: Clears A2 and A5 in all template sheets
+'==============================================================================
+Private Sub ClearTemplateMetadata()
+    
+    Dim wsTemplate As Worksheet
+    
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            wsTemplate.Range("A2").ClearContents
+            wsTemplate.Range("A5").ClearContents
+        End If
+    Next wsTemplate
+    
+    Dim sht As Worksheet
+    Set sht = ThisWorkbook.Worksheets("app")
+    
+    sht.Activate
+    sht.Range("A1").Select
+    
+End Sub
