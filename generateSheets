@@ -1,0 +1,580 @@
+Option Explicit
+
+'==============================================================================
+' SHEET GENERATOR - Main Entry Point
+'==============================================================================
+' Purpose: Generate individual sheets from templates for each query item
+' Author: Created for sheet generation automation
+' Last Modified: 2025-12-30
+'==============================================================================
+
+Sub GenerateSheets()
+    
+    On Error GoTo ErrorHandler
+    
+    '--- Disable screen updates for performance ---
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    Application.StatusBar = "Starting sheet generation process..."
+    
+    '--- STEP 1: Pre-flight checks ---
+    Application.StatusBar = "Running pre-flight checks..."
+    
+    If Not CheckInternetConnection() Then
+        MsgBox "You are not connected to the internet." & vbCrLf & vbCrLf & _
+               "Please connect to the internet and try again.", _
+               vbExclamation, "Internet Connection Required"
+        GoTo CleanExit
+    End If
+    
+    If Not CheckVPNConnection() Then
+        MsgBox "You are not connected to the VPN." & vbCrLf & vbCrLf & _
+               "Please connect to FortiClient VPN and try again.", _
+               vbExclamation, "VPN Connection Required"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 2: Validation ---
+    Application.StatusBar = "Validating configuration..."
+    
+    Dim validationResult As String
+    validationResult = ValidateConfiguration()
+    
+    If validationResult <> "" Then
+        MsgBox validationResult, vbExclamation, "Configuration Error"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 3: Refresh Power Query connections (once) ---
+    Application.StatusBar = "Refreshing Power Query connections..."
+    
+    Dim refreshResult As String
+    refreshResult = RefreshPowerQueries()
+    
+    If refreshResult <> "" Then
+        MsgBox refreshResult, vbExclamation, "Power Query Refresh Error"
+        GoTo CleanExit
+    End If
+    
+    '--- STEP 4: Generate sheets ---
+    Application.StatusBar = "Generating sheets from templates..."
+    
+    Dim sheetsGenerated As Long
+    sheetsGenerated = GenerateAllSheets()
+    
+    '--- STEP 5: Success message ---
+    Application.StatusBar = "Sheet generation complete!"
+    
+    Dim successMsg As String
+    successMsg = "Sheet generation completed successfully!" & vbCrLf & vbCrLf & _
+                 "Sheets generated: " & sheetsGenerated & vbCrLf & _
+                 "Location: " & ThisWorkbook.Name
+    
+    MsgBox successMsg, vbInformation, "Success"
+    
+CleanExit:
+    '--- Clear template metadata ---
+    ClearTemplateMetadata
+    '--- Restore Excel settings ---
+    Application.ScreenUpdating = True
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.StatusBar = False
+    Exit Sub
+    
+ErrorHandler:
+    MsgBox "An unexpected error occurred:" & vbCrLf & vbCrLf & _
+           "Error " & Err.Number & ": " & Err.Description, _
+           vbCritical, "Error"
+    GoTo CleanExit
+    
+End Sub
+
+'==============================================================================
+' VALIDATE CONFIGURATION
+'==============================================================================
+' Returns: Empty string if valid, error message if invalid
+' Checks: Templates exist, query items exist, sheet names exist
+'==============================================================================
+Private Function ValidateConfiguration() As String
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    '--- Check 1: At least one template sheet exists ---
+    Dim ws As Worksheet
+    Dim hasTemplates As Boolean
+    hasTemplates = False
+    
+    For Each ws In ThisWorkbook.Worksheets
+        If Left(ws.Name, 6) = "tmplt_" Then
+            hasTemplates = True
+            Exit For
+        End If
+    Next ws
+    
+    If Not hasTemplates Then
+        ValidateConfiguration = "No template sheets found." & vbCrLf & vbCrLf & _
+                               "Template sheets must start with 'tmplt_' (e.g., tmplt_P&L)."
+        Exit Function
+    End If
+    
+    '--- Check 2: At least one query item exists (column C, row 25+) ---
+    Dim hasQueryItems As Boolean
+    hasQueryItems = False
+    
+    Dim i As Long
+    For i = 25 To appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+        If Trim(appSheet.Cells(i, "C").Value) <> "" Then
+            hasQueryItems = True
+            Exit For
+        End If
+    Next i
+    
+    If Not hasQueryItems Then
+        ValidateConfiguration = "No query items found." & vbCrLf & vbCrLf & _
+                               "Please enter at least one query item in column C starting at row 25."
+        Exit Function
+    End If
+    
+    '--- Check 3: Corresponding sheet names exist (column E, row 25+) ---
+    For i = 25 To appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+        If Trim(appSheet.Cells(i, "C").Value) <> "" Then
+            If Trim(appSheet.Cells(i, "E").Value) = "" Then
+                ValidateConfiguration = "Missing sheet name in row " & i & "." & vbCrLf & vbCrLf & _
+                                       "Each query item must have a corresponding sheet name in column E."
+                Exit Function
+            End If
+        End If
+    Next i
+    
+    '--- Check 4: Sheet name patterns must contain {tmplt_} placeholder ---
+    For i = 25 To appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+        If Trim(appSheet.Cells(i, "C").Value) <> "" Then
+            Dim sheetPattern As String
+            sheetPattern = Trim(appSheet.Cells(i, "E").Value)
+            
+            If InStr(sheetPattern, "{tmplt_}") = 0 Then
+                ValidateConfiguration = "Invalid sheet name pattern in row " & i & "." & vbCrLf & vbCrLf & _
+                                       "Sheet names must contain {tmplt_} placeholder." & vbCrLf & _
+                                       "Example: " & Chr(34) & "Report - {tmplt_}" & Chr(34)
+                Exit Function
+            End If
+        End If
+    Next i
+    
+    '--- All checks passed ---
+    ValidateConfiguration = ""
+    
+End Function
+
+'==============================================================================
+' REFRESH POWER QUERIES
+'==============================================================================
+' Returns: Empty string if successful, error message if failed
+' Purpose: Refresh all Power Query connections listed in column H (row 6+)
+'==============================================================================
+Private Function RefreshPowerQueries() As String
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    '--- Find last row with table names in column H ---
+    Dim lastRow As Long
+    lastRow = appSheet.Cells(appSheet.Rows.count, "H").End(xlUp).Row
+    
+    '--- If no tables listed, skip this step ---
+    If lastRow < 6 Then
+        RefreshPowerQueries = ""
+        Exit Function
+    End If
+    
+    '--- Disable background refresh for synchronous operation ---
+    Dim cn As WorkbookConnection
+    For Each cn In ThisWorkbook.Connections
+        If cn.Type = xlConnectionTypeOLEDB Then
+            On Error Resume Next
+            cn.OLEDBConnection.BackgroundQuery = False
+            On Error GoTo 0
+        End If
+    Next cn
+    
+    '--- Loop through each table name and refresh ---
+    Dim i As Long
+    Dim tableName As String
+    Dim connectionFound As Boolean
+    Dim tableFound As Boolean
+    
+    For i = 6 To lastRow
+        
+        tableName = Trim(appSheet.Cells(i, "H").Value)
+        
+        '--- Skip empty rows ---
+        If tableName = "" Then GoTo NextTable
+        
+        '--- Step 1: Refresh the Power Query connection ---
+        connectionFound = False
+        
+        For Each cn In ThisWorkbook.Connections
+            '--- Connection name might be "Query - TableName" or just "TableName" ---
+            If cn.Name = "Query - " & tableName Or cn.Name = tableName Then
+                On Error Resume Next
+                cn.Refresh
+                Application.CalculateUntilAsyncQueriesDone
+                On Error GoTo 0
+                connectionFound = True
+                Exit For
+            End If
+        Next cn
+        
+        If Not connectionFound Then
+            RefreshPowerQueries = "Power Query connection not found: " & tableName & vbCrLf & vbCrLf & _
+                                 "Please check that the connection name in column H is correct."
+            Exit Function
+        End If
+        
+        '--- Step 2: Refresh the table itself ---
+        tableFound = False
+        Dim ws As Worksheet
+        Dim tbl As ListObject
+        
+        For Each ws In ThisWorkbook.Worksheets
+            On Error Resume Next
+            Set tbl = ws.ListObjects(tableName)
+            On Error GoTo 0
+            
+            If Not tbl Is Nothing Then
+                tbl.Refresh
+                tableFound = True
+                Exit For
+            End If
+        Next ws
+        
+        If Not tableFound Then
+            RefreshPowerQueries = "Table not found: " & tableName & vbCrLf & vbCrLf & _
+                                 "Please check that the table name in column H is correct."
+            Exit Function
+        End If
+        
+        Application.StatusBar = "Refreshed Power Query: " & tableName
+        
+NextTable:
+    Next i
+    
+    '--- All refreshes successful ---
+    RefreshPowerQueries = ""
+    
+End Function
+
+'==============================================================================
+' GENERATE ALL SHEETS
+'==============================================================================
+' Returns: Number of sheets generated
+' Purpose: Main sheet generation loop - creates sheets for each query item
+'==============================================================================
+Private Function GenerateAllSheets() As Long
+    
+    Dim appSheet As Worksheet
+    Set appSheet = ThisWorkbook.Worksheets("app")
+    
+    Dim sheetsGenerated As Long
+    sheetsGenerated = 0
+    
+    '--- Find last row with query items ---
+    Dim lastRow As Long
+    lastRow = appSheet.Cells(appSheet.Rows.count, "C").End(xlUp).Row
+    
+    '--- Loop through each query item ---
+    Dim currentRow As Long
+    For currentRow = 25 To lastRow
+        
+        Dim queryItem As String
+        Dim sheetNamePattern As String
+        
+        queryItem = Trim(appSheet.Cells(currentRow, "C").Value)
+        sheetNamePattern = Trim(appSheet.Cells(currentRow, "E").Value)
+        
+        '--- Skip empty rows ---
+        If queryItem = "" Then GoTo NextRow
+        
+        Application.StatusBar = "Generating sheets for: " & queryItem
+        
+        '--- Generate sheets from all templates for this query ---
+        Dim templatesProcessed As Long
+        templatesProcessed = GenerateSheetsForQuery(queryItem, sheetNamePattern)
+        
+        sheetsGenerated = sheetsGenerated + templatesProcessed
+        
+NextRow:
+    Next currentRow
+    
+    GenerateAllSheets = sheetsGenerated
+    
+End Function
+
+'==============================================================================
+' GENERATE SHEETS FOR QUERY
+'==============================================================================
+' Returns: Number of sheets generated for this query
+' Purpose: Creates one sheet per template for a specific query item
+'==============================================================================
+Private Function GenerateSheetsForQuery(queryItem As String, _
+                                        sheetNamePattern As String) As Long
+    
+    Dim wsTemplate As Worksheet
+    Dim wsNew As Worksheet
+    Dim wsExisting As Worksheet
+    
+    Dim baseTemplateName As String
+    Dim finalSheetName As String
+    Dim timestamp As String
+    Dim sheetsCreated As Long
+    
+    timestamp = "Generated: " & Format(Now, "yyyy-mm-dd hh:mm:ss")
+    sheetsCreated = 0
+    
+    '--- Loop through all template sheets ---
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            
+            '--- Extract base template name (remove "tmplt_" prefix) ---
+            baseTemplateName = Mid(wsTemplate.Name, 7)
+            
+            '--- Build final sheet name by replacing placeholder ---
+            finalSheetName = Replace(sheetNamePattern, "{tmplt_}", baseTemplateName)
+            
+            Application.StatusBar = "Creating sheet: " & finalSheetName
+            
+            '--- Step 1: Delete existing sheet if it exists ---
+            DeleteSheetIfExists finalSheetName
+            
+            '--- Step 2: Copy template sheet ---
+            wsTemplate.Copy After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.count)
+            Set wsNew = ActiveSheet
+            
+            '--- Step 3: Update query item and timestamp ---
+            UpdateSheetMetadata wsNew, queryItem, timestamp
+            
+            '--- Step 4: Rename the sheet ---
+            wsNew.Name = finalSheetName
+            
+            '--- Step 5: Fix internal formula references ---
+            FixInternalFormulas wsNew, sheetNamePattern
+            
+            '--- Step 6: Force recalculation ---
+            wsNew.Calculate
+            
+            sheetsCreated = sheetsCreated + 1
+            
+        End If
+        
+    Next wsTemplate
+    
+    GenerateSheetsForQuery = sheetsCreated
+    
+End Function
+
+'==============================================================================
+' DELETE SHEET IF EXISTS
+'==============================================================================
+' Purpose: Safely deletes a sheet if it exists (no error if not found)
+'==============================================================================
+Private Sub DeleteSheetIfExists(sheetName As String)
+    
+    Dim ws As Worksheet
+    
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+    
+    If Not ws Is Nothing Then
+        Application.DisplayAlerts = False
+        ws.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+End Sub
+
+'==============================================================================
+' UPDATE SHEET METADATA
+'==============================================================================
+' Purpose: Updates A2 (query item) and A5 (timestamp) in the new sheet
+'==============================================================================
+Private Sub UpdateSheetMetadata(ws As Worksheet, queryItem As String, _
+                                timestamp As String)
+    
+    '--- Update query item in A2 ---
+    ws.Range("A2").Value = queryItem
+    
+    '--- Update timestamp in A5 ---
+    ws.Range("A5").Value = timestamp
+    
+End Sub
+
+'==============================================================================
+' FIX INTERNAL FORMULAS
+'==============================================================================
+' Purpose: Updates formulas to reference other generated sheets instead of templates
+' Example: =tmplt_Finance!D7 becomes =SCL - Finance - v1!D7
+'==============================================================================
+Private Sub FixInternalFormulas(ws As Worksheet, sheetNamePattern As String)
+    
+    Dim wsTemplate As Worksheet
+    Dim baseTemplateName As String
+    Dim targetSheetName As String
+    Dim searchString As String
+    Dim replaceString As String
+    
+    '--- Loop through all template sheets ---
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            
+            '--- Extract base template name (remove "tmplt_" prefix) ---
+            baseTemplateName = Mid(wsTemplate.Name, 7)
+            
+            '--- Build the target sheet name using the pattern ---
+            targetSheetName = Replace(sheetNamePattern, "{tmplt_}", baseTemplateName)
+            
+            '--- Build search and replace strings ---
+            searchString = wsTemplate.Name & "!"
+            replaceString = "'" & targetSheetName & "'!"
+            
+            '--- Replace all references in formulas ---
+            On Error Resume Next
+            ws.Cells.Replace _
+                What:=searchString, _
+                Replacement:=replaceString, _
+                LookAt:=xlPart, _
+                SearchOrder:=xlByRows, _
+                MatchCase:=False, _
+                SearchFormat:=False, _
+                ReplaceFormat:=False
+            On Error GoTo 0
+            
+        End If
+        
+    Next wsTemplate
+    
+End Sub
+
+'==============================================================================
+' UTILITY: COUNT TEMPLATE SHEETS
+'==============================================================================
+' Returns: Number of template sheets in the workbook
+' Purpose: Helper function for reporting and validation
+'==============================================================================
+Private Function CountTemplateSheets() As Long
+    
+    Dim ws As Worksheet
+    Dim count As Long
+    
+    count = 0
+    
+    For Each ws In ThisWorkbook.Worksheets
+        If Left(ws.Name, 6) = "tmplt_" Then
+            count = count + 1
+        End If
+    Next ws
+    
+    CountTemplateSheets = count
+    
+End Function
+
+'==============================================================================
+' UTILITY: GET TEMPLATE NAMES
+'==============================================================================
+' Returns: Comma-separated list of template names (without "tmplt_" prefix)
+' Purpose: Helper function for user messages and debugging
+'==============================================================================
+Private Function GetTemplateNames() As String
+    
+    Dim ws As Worksheet
+    Dim templateNames As String
+    
+    templateNames = ""
+    
+    For Each ws In ThisWorkbook.Worksheets
+        If Left(ws.Name, 6) = "tmplt_" Then
+            If templateNames <> "" Then templateNames = templateNames & ", "
+            templateNames = templateNames & Mid(ws.Name, 7)
+        End If
+    Next ws
+    
+    GetTemplateNames = templateNames
+    
+End Function
+
+'==============================================================================
+' CLEAR TEMPLATE METADATA
+'==============================================================================
+' Purpose: Clears A2 and A5 in all template sheets
+'==============================================================================
+Private Sub ClearTemplateMetadata()
+    
+    Dim wsTemplate As Worksheet
+    
+    For Each wsTemplate In ThisWorkbook.Worksheets
+        If Left(wsTemplate.Name, 6) = "tmplt_" Then
+            wsTemplate.Range("A2").ClearContents
+            wsTemplate.Range("A5").ClearContents
+        End If
+    Next wsTemplate
+    
+    Dim sht As Worksheet
+    Set sht = ThisWorkbook.Worksheets("app")
+    
+    sht.Activate
+    sht.Range("A1").Select
+    
+End Sub
+
+'==============================================================================
+' CHECK INTERNET CONNECTION
+'==============================================================================
+' Returns: True if connected to internet, False otherwise
+'==============================================================================
+Private Function CheckInternetConnection() As Boolean
+    
+    On Error Resume Next
+    
+    Dim http As Object
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    
+    http.Open "GET", "https://www.microsoft.com", False
+    http.SetTimeouts 5000, 5000, 5000, 5000  'Set 5 second timeout
+    http.Send
+    
+    If Err.Number = 0 And http.status = 200 Then
+        CheckInternetConnection = True
+    Else
+        CheckInternetConnection = False
+    End If
+    
+    On Error GoTo 0
+    
+End Function
+
+'==============================================================================
+' CHECK VPN CONNECTION
+'==============================================================================
+' Returns: True if connected to VPN, False otherwise
+' Method: Checks if a known network file exists
+'==============================================================================
+Private Function CheckVPNConnection() As Boolean
+    
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    
+    '--- Check if network path is accessible ---
+    If fso.FileExists("I:\SYMPHONY\Farhan Munim\ping.xlsx") Then
+        CheckVPNConnection = True
+    Else
+        CheckVPNConnection = False
+    End If
+    
+End Function
