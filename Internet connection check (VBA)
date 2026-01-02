@@ -1,0 +1,17 @@
+Sub CheckInternetConnection()
+    Dim internetStatus As String
+    internetStatus = "FAIL. You must be connected to the internet to use this tool."
+    On Error Resume Next
+    Dim http As Object
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.Open "GET", "https://www.microsoft.com", False
+    http.SetTimeouts 5000, 5000, 5000, 5000
+    http.Send
+    If Err.Number = 0 Then
+        If http.Status = 200 Then internetStatus = "OK"
+    End If
+    On Error GoTo 0
+    
+    ' Display the result
+    MsgBox internetStatus
+End Sub
