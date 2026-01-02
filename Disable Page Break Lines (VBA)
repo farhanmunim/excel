@@ -1,0 +1,6 @@
+Sub DisablePageBreakView()
+    ' Turns off page break display for active sheet
+    On Error Resume Next
+    ActiveSheet.DisplayPageBreaks = False
+    On Error GoTo 0
+End Sub
