@@ -1,0 +1,4 @@
+Sub ToggleReferenceStyle()
+    ' Switches between A1 and R1C1 reference styles
+    Application.ReferenceStyle = IIf(Application.ReferenceStyle = xlA1, xlR1C1, xlA1)
+End Sub
