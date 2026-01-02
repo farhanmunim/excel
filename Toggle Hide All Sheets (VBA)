@@ -1,0 +1,29 @@
+Sub ToggleHideAllSheetsExceptActive()
+    ' Hides all sheets except active, or unhides all if already hidden
+    Dim sheet As Worksheet
+    Dim countVisibleSheets As Long
+    Dim Workbook As Workbook
+    
+    Set Workbook = ActiveWorkbook
+    countVisibleSheets = 0
+    
+    ' Count currently visible sheets
+    For Each sheet In Workbook.Worksheets
+        If sheet.Visible = xlSheetVisible Then
+            countVisibleSheets = countVisibleSheets + 1
+        End If
+    Next sheet
+    
+    ' Toggle: if multiple visible, hide all except active; otherwise show all
+    If countVisibleSheets > 1 Then
+        For Each sheet In Workbook.Worksheets
+            If sheet.Name <> ActiveSheet.Name Then
+                sheet.Visible = xlSheetHidden
+            End If
+        Next sheet
+    Else
+        For Each sheet In Workbook.Worksheets
+            sheet.Visible = xlSheetVisible
+        Next sheet
+    End If
+End Sub
