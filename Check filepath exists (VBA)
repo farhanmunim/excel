@@ -1,0 +1,11 @@
+Sub CheckFileExists()
+    Dim fso As Object
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Dim filepath As String
+    filepath = "G:\Google Drive\Static\ping.xlsx"
+    If fso.FileExists(filepath) Then
+        MsgBox "File exists"
+    Else
+        MsgBox "File does not exist"
+    End If
+End Sub
